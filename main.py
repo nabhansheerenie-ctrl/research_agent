@@ -1,23 +1,38 @@
 import os
 from crewai import Agent, Task, Crew
 from crewai_tools import SerperDevTool
-from crewai.tools import tool 
+from crewai.tools import tool
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 from serpapi import GoogleSearch
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, ConfigDict
+import asyncio
+from typing import Optional
 
 # Load API keys
 load_dotenv()
 
-# Initialize LLM
-llm = ChatGroq(
-    temperature=0,
-    model="groq/llama-3.3-70b-versatile",
-    max_tokens=200,
-    api_key=os.getenv("GROQ_API_KEY")
-)
+# Initialize FastAPI app
+app = FastAPI()
 
-# Initialize Search Tool (Serper for general web search)
+# Pydantic model for request
+class ResearchRequest(BaseModel):
+    query: str
+    max_tokens: Optional[int] = 200
+    
+    model_config = ConfigDict(protected_namespaces=())
+
+# Initialize LLM
+def get_llm(max_tokens=200):
+    return ChatGroq(
+        temperature=0,
+        model="groq/llama-3.3-70b-versatile",
+        max_tokens=max_tokens,
+        api_key=os.getenv("GROQ_API_KEY")
+    )
+
+# Initialize Search Tool
 search_tool = SerperDevTool(api_key=os.getenv("SERPER_API_KEY"))
 
 # Define Google Trends tool using SerpAPI
@@ -28,7 +43,7 @@ def google_trends_tool(keyword: str) -> str:
         params = {
             "engine": "google_trends",
             "q": keyword,
-            "data_type": "TIMESERIES",  # Options: TIMESERIES, RELATED_QUERIES, RELATED_TOPICS
+            "data_type": "TIMESERIES",
             "api_key": os.getenv("SERPAPI_KEY")
         }
 
@@ -47,36 +62,73 @@ def google_trends_tool(keyword: str) -> str:
     except Exception as e:
         return f"Error fetching Google Trends: {e}"
 
-# Define the Agent
-research_agent = Agent(
-    role="News Reporter",
-    goal="Provide the latest current news using web search and SerpAPI tools.",
-    backstory="A skilled reporter who stays up to date with the latest global happenings.",
-    allow_delegation=False,
-    verbose=True,
-    llm=llm,
-    tools=[search_tool, google_trends_tool]  
-)
+@app.get("/")
+async def root():
+    """Simple root endpoint"""
+    return {
+        "message": "AI Research API is running",
+        "usage": "Send POST request to /research with {'query': 'your research topic'}",
+        "example_queries": [
+            "latest AI trends in 2025",
+            "renewable energy advancements",
+            "quantum computing progress",
+            "cybersecurity trends 2024",
+            "space exploration updates",
+            "healthcare technology innovations"
+        ]
+    }
 
-# Task setup
-research_task = Task(
-    description=(
-        "Fetch and summarize the latest world news headlines today."
-        
-    ),
-    expected_output="A clear summary of the top current news.",
-    agent=research_agent
-)
+@app.post("/research")
+async def research_ai_trends(request: ResearchRequest):
+    """
+    Research AI trends based on user query using web search and Google Trends.
+    Returns the detailed LLM response directly.
+    """
+    try:
+        # Initialize LLM with custom token limit
+        llm = get_llm(request.max_tokens)
 
-# Crew execution
-crew = Crew(
-    agents=[research_agent],
-    tasks=[research_task],
-    verbose=True
-)
+        # Define the Research Agent
+        research_agent = Agent(
+            role="AI Research Analyst",
+            goal=f"Research and summarize: {request.query} using web search and trend data.",
+            backstory="An expert researcher specializing in technology trends analysis using search tools and Google Trends.",
+            allow_delegation=False,
+            verbose=True,
+            llm=llm,
+            tools=[search_tool, google_trends_tool]
+        )
 
-# Run the Crew
-result = crew.kickoff()
+        # Create research task with user query
+        research_task = Task(
+            description=(
+                f"Comprehensively research and analyze: {request.query} "
+                "Include current trends, recent developments, and future outlook. "
+                "Use web search for latest information and include Google Trends insights for relevant keywords."
+            ),
+            expected_output="Detailed summary including current trends, recent developments, and future outlook with supporting data.",
+            agent=research_agent
+        )
 
-print("\n--- Research Results ---\n")
-print(result)
+        # Setup Crew
+        crew = Crew(
+            agents=[research_agent],
+            tasks=[research_task],
+            verbose=True
+        )
+
+        # Run the research asynchronously
+        result = await asyncio.to_thread(crew.kickoff)
+
+        return {
+            "status": "success",
+            "query": request.query,
+            "result": result
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Research failed: {str(e)}")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
